@@ -667,6 +667,8 @@ def generate_world(rng, params, static_params):
         trade_count=jnp.asarray(0, dtype=jnp.int32),
         food_trade_count=jnp.asarray(0, dtype=jnp.int32),
         drink_trade_count=jnp.asarray(0, dtype=jnp.int32),
+        food_given_matrix=jnp.zeros((static_params.player_count, static_params.player_count), dtype=jnp.int32),
+        drink_given_matrix=jnp.zeros((static_params.player_count, static_params.player_count), dtype=jnp.int32),
         revives=jnp.asarray(0, dtype=jnp.int32),
         ff_damage_dealt=jnp.asarray(0.0, dtype=jnp.float32),
         all_necessities_frac=jnp.ones((static_params.player_count,), dtype=jnp.float32),

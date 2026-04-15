@@ -3395,11 +3395,11 @@ def trade_materials(state, action, static_params):
         )
         new_material = current_material_stock - 1 * is_giving_material
         new_material = new_material.at[player_trading_to].add(is_giving_material)
-        return new_material, old_trade_count + is_giving_material.sum()
+        return new_material, old_trade_count + is_giving_material.sum(), is_giving_material
     
     # Food
     food_trade_count = 0
-    new_food, food_trade_count = _new_material_value(
+    new_food, food_trade_count, food_giving_material = _new_material_value(
         Action.REQUEST_FOOD.value, state.player_food, get_max_food(state), food_trade_count
     )
     new_hunger = jnp.where(new_food>state.player_food, 0.0, state.player_hunger)
@@ -3413,7 +3413,7 @@ def trade_materials(state, action, static_params):
     
     # Drink
     drink_trade_count = 0
-    new_drink, drink_trade_count = _new_material_value(
+    new_drink, drink_trade_count, drink_giving_material = _new_material_value(
         Action.REQUEST_DRINK.value, state.player_drink, get_max_drink(state), drink_trade_count
     )
     new_thirst = jnp.where(new_drink>state.player_drink, 0.0, state.player_thirst)
@@ -3426,27 +3426,30 @@ def trade_materials(state, action, static_params):
     new_trade_count += drink_trade_count
 
     # Inventory Materials
-    new_wood, new_trade_count = _new_material_value(
+    new_wood, new_trade_count, _ = _new_material_value(
         Action.REQUEST_WOOD.value, state.inventory.wood, 99, new_trade_count
     )
-    new_stone, new_trade_count = _new_material_value(
+    new_stone, new_trade_count, _ = _new_material_value(
         Action.REQUEST_STONE.value, state.inventory.stone, 99, new_trade_count
     )
-    new_iron, new_trade_count = _new_material_value(
+    new_iron, new_trade_count, _ = _new_material_value(
         Action.REQUEST_IRON.value, state.inventory.iron, 99, new_trade_count
     )
-    new_coal, new_trade_count = _new_material_value(
+    new_coal, new_trade_count, _ = _new_material_value(
         Action.REQUEST_COAL.value, state.inventory.coal, 99, new_trade_count
     )
-    new_diamond, new_trade_count = _new_material_value(
+    new_diamond, new_trade_count, _ = _new_material_value(
         Action.REQUEST_DIAMOND.value, state.inventory.diamond, 99, new_trade_count
     )
-    new_ruby, new_trade_count = _new_material_value(
+    new_ruby, new_trade_count, _ = _new_material_value(
         Action.REQUEST_RUBY.value, state.inventory.ruby, 99, new_trade_count
     )
-    new_sapphire, new_trade_count = _new_material_value(
+    new_sapphire, new_trade_count, _ = _new_material_value(
         Action.REQUEST_SAPPHIRE.value, state.inventory.sapphire, 99, new_trade_count
     )
+
+    new_food_given_matrix = state.food_given_matrix.at[jnp.arange(static_params.player_count), player_trading_to].add(food_giving_material)
+    new_drink_given_matrix = state.drink_given_matrix.at[jnp.arange(static_params.player_count), player_trading_to].add(drink_giving_material)
 
     # Update State
     state = state.replace(
@@ -3467,6 +3470,8 @@ def trade_materials(state, action, static_params):
         trade_count=new_trade_count,
         food_trade_count=new_food_trade_count,
         drink_trade_count=new_drink_trade_count,
+        food_given_matrix=new_food_given_matrix,
+        drink_given_matrix=new_drink_given_matrix,
     )
     return state
 
