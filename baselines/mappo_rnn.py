@@ -8,6 +8,7 @@ Credit goes to the original authors: Rutherford et al.
 # ===========================
 import os
 import sys
+import sqlite3
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
@@ -33,6 +34,7 @@ from jaxmarl.wrappers.baselines import LogWrapper
 from jaxmarl.wrappers.baselines import JaxMARLWrapper
 
 from craftax.craftax_env import make_craftax_env_from_name
+from craftax.craftax_coop.world_gen.empowerment import estimate_craftax_empowerment_monte_carlo
 
 
 # ===========================
@@ -279,6 +281,12 @@ def make_train(config, env):
                 env_act = unbatchify_actions(
                     action, env.agents, config["NUM_ENVS"], env.num_agents
                 )
+                
+                if config.get("RANDOM_ASSISTANT", False):
+                    rng, _rng_rand = jax.random.split(rng)
+                    num_acts = env.action_space("agent_1").n
+                    env_act["agent_1"] = jax.random.randint(_rng_rand, (config["NUM_ENVS"],), 0, num_acts)
+
                 # VALUE
                 world_state = last_obs["world_state"].swapaxes(0,1)
                 world_state = world_state.reshape((config["NUM_ACTORS"],-1))
@@ -295,6 +303,54 @@ def make_train(config, env):
                     env.step, in_axes=(0, 0, 0)
                 )(rng_step, env_state, env_act)
                 info = jax.tree.map(lambda x: x.reshape((config["NUM_ACTORS"])), info)
+
+                # EMPOWERMENT HYBRID REWARD
+                def _calculate_empowerment(state):
+                    # env._env._env accesses the unwrapped CraftaxCoopSymbolicEnv
+                    # state is LogEnvState, its .env_state is the inner EnvState
+                    return estimate_craftax_empowerment_monte_carlo(
+                        env._env._env, state.env_state, n_trajectories=5, horizon=3
+                    )
+                empowerment_by_agent = jax.vmap(_calculate_empowerment)(env_state)
+                # empowerment_by_agent is a list [agent0_emp, agent1_emp, agent2_emp]
+                # each tensor is of shape [NUM_ENVS]
+                alpha = 1.0
+                reward["agent_1"] = reward["agent_1"] + alpha * empowerment_by_agent[2]
+
+                # Sharing frequencies (ignoring the exact boundary step for resets)
+                food_diff = env_state.env_state.food_given_matrix - runner_state[1].env_state.food_given_matrix
+                drink_diff = env_state.env_state.drink_given_matrix - runner_state[1].env_state.drink_given_matrix
+                step_food_given = jnp.maximum(0, food_diff)
+                step_drink_given = jnp.maximum(0, drink_diff)
+                
+                info["custom_step_food_h_to_u"] = jnp.repeat(step_food_given[:, 1, 2], 3)
+                info["custom_step_food_h_to_b"] = jnp.repeat(step_food_given[:, 1, 0], 3)
+                info["custom_step_drink_h_to_u"] = jnp.repeat(step_drink_given[:, 1, 2], 3)
+                info["custom_step_drink_h_to_b"] = jnp.repeat(step_drink_given[:, 1, 0], 3)
+
+                info["custom_emp_agent_0"] = empowerment_by_agent[0]
+                info["custom_emp_agent_1"] = empowerment_by_agent[1]
+                info["custom_emp_agent_2"] = empowerment_by_agent[2]
+                
+                info["custom_val_agent_1"] = value.reshape((3, config["NUM_ENVS"]))[1]
+                info["custom_rew_agent_0"] = reward["agent_0"]
+                info["custom_rew_agent_1"] = reward["agent_1"]
+                info["custom_rew_agent_2"] = reward["agent_2"]
+
+                # Extract health and alive status
+                info["custom_health_agent_0"] = env_state.env_state.player_health[:, 0]
+                info["custom_health_agent_1"] = env_state.env_state.player_health[:, 1]
+                info["custom_health_agent_2"] = env_state.env_state.player_health[:, 2]
+                info["custom_alive_agent_0"] = env_state.env_state.player_alive[:, 0]
+                info["custom_alive_agent_1"] = env_state.env_state.player_alive[:, 1]
+                info["custom_alive_agent_2"] = env_state.env_state.player_alive[:, 2]
+
+                agent_mask = jnp.ones((len(env.agents), config["NUM_ENVS"]))
+                if config.get("RANDOM_ASSISTANT", False):
+                    agent_idx = env.agents.index("agent_1")
+                    agent_mask = agent_mask.at[agent_idx].set(0.0)
+                info["agent_mask"] = agent_mask.reshape((config["NUM_ACTORS"],))
+
                 done_batch = batchify(done, env.agents, config["NUM_ACTORS"]).squeeze()
                 transition = Transition(
                     jnp.tile(done["__all__"], env.num_agents),
@@ -382,12 +438,14 @@ def make_train(config, env):
                             * gae
                         )
                         loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
-                        loss_actor = loss_actor.mean()
-                        entropy = pi.entropy().mean()
+                        
+                        mask = traj_batch.info["agent_mask"]
+                        loss_actor = (loss_actor * mask).sum() / (mask.sum() + 1e-8)
+                        entropy = (pi.entropy() * mask).sum() / (mask.sum() + 1e-8)
 
                         # debug
-                        approx_kl = ((ratio - 1) - logratio).mean()
-                        clip_frac = jnp.mean(jnp.abs(ratio - 1) > config["CLIP_EPS"])
+                        approx_kl = (((ratio - 1) - logratio) * mask).sum() / (mask.sum() + 1e-8)
+                        clip_frac = (jnp.array(jnp.abs(ratio - 1) > config["CLIP_EPS"], dtype=jnp.float32) * mask).sum() / (mask.sum() + 1e-8)
 
                         actor_loss = (
                             loss_actor
@@ -406,8 +464,10 @@ def make_train(config, env):
                         value_losses = jnp.square(value - targets)
                         value_losses_clipped = jnp.square(value_pred_clipped - targets)
                         value_loss = (
-                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped)
                         )
+                        mask = traj_batch.info["agent_mask"]
+                        value_loss = (value_loss * mask).sum() / (mask.sum() + 1e-8)
                         critic_loss = config["VF_COEF"] * value_loss
                         return critic_loss, (value_loss)
 
@@ -520,15 +580,127 @@ def make_train(config, env):
                     **metric["loss"],
                 }
 
+                # Approximate per-episode quantities via rollout sums scaled by typical frequencies
+                to_log["agent_0_mean_episode_returns"] = float(metric["custom_rew_agent_2"].sum(axis=0).mean())
+                to_log["agent_1_mean_episode_returns"] = float(metric["custom_rew_agent_0"].sum(axis=0).mean())
+                to_log["helper_mean_episode_returns"] = float(metric["custom_rew_agent_1"].sum(axis=0).mean())
+
+                to_log["agent_0_mean_episode_empowerment"] = float(metric["custom_emp_agent_2"].mean())
+                to_log["agent_1_mean_episode_empowerment"] = float(metric["custom_emp_agent_0"].mean())
+                to_log["helper_mean_episode_critic_predictions"] = float(metric["custom_val_agent_1"].mean())
+                to_log["freeze_frequency_mean"] = 0.0
+                
+                # Format to match index assignments from returns (agent_0->2, agent_1->0, helper->1)
+                to_log["agent_0_mean_health"] = float(metric["custom_health_agent_2"].mean())
+                to_log["agent_1_mean_health"] = float(metric["custom_health_agent_0"].mean())
+                to_log["helper_mean_health"] = float(metric["custom_health_agent_1"].mean())
+                to_log["agent_0_mean_alive"] = float(metric["custom_alive_agent_2"].mean())
+                to_log["agent_1_mean_alive"] = float(metric["custom_alive_agent_0"].mean())
+                to_log["helper_mean_alive"] = float(metric["custom_alive_agent_1"].mean())
+                
+                to_log["helper_gave_food_to_user"] = float(metric["custom_step_food_h_to_u"].sum(axis=0).mean())
+                to_log["helper_gave_food_to_bystander"] = float(metric["custom_step_food_h_to_b"].sum(axis=0).mean())
+                to_log["helper_gave_water_to_user"] = float(metric["custom_step_drink_h_to_u"].sum(axis=0).mean())
+                to_log["helper_gave_water_to_bystander"] = float(metric["custom_step_drink_h_to_b"].sum(axis=0).mean())
+
                 if metric["returned_episode"].any():
                     to_log.update(jax.tree.map(
-                        lambda x: x[metric["returned_episode"]].mean(),
+                        lambda x: float(x[metric["returned_episode"]].mean()),
                         metric["user_info"]
                     ))
-                    to_log["episode_lengths"] = metric["returned_episode_lengths"][metric["returned_episode"]].mean()
-                    to_log["episode_returns"] = metric["returned_episode_returns"][metric["returned_episode"]].mean()
-                print(to_log)
-                wandb.log(to_log)
+                    to_log["episode_lengths"] = float(metric["returned_episode_lengths"][metric["returned_episode"]].mean())
+                    to_log["episode_returns"] = float(metric["returned_episode_returns"][metric["returned_episode"]].mean())
+                print({k: v for k, v in to_log.items() if "loss" not in k})
+                
+                if wandb.run is not None:
+                    wandb.log(to_log)
+                    wandb_id = wandb.run.id
+                else:
+                    wandb_id = "offline"
+
+                db_path = "train_data/experiment_data.db"
+                os.makedirs("train_data", exist_ok=True)
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS phase2_metrics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        wandbid TEXT,
+                        helper_objective TEXT,
+                        epoch INTEGER,
+                        helper_mean_episode_returns REAL,
+                        helper_mean_episode_critic_predictions REAL,
+                        agent_0_mean_episode_returns REAL,
+                        agent_1_mean_episode_returns REAL,
+                        agent_0_mean_episode_empowerment REAL,
+                        agent_1_mean_episode_empowerment REAL,
+                        freeze_frequency_mean REAL,
+                        agent_0_mean_health REAL,
+                        agent_1_mean_health REAL,
+                        helper_mean_health REAL,
+                        agent_0_mean_alive REAL,
+                        agent_1_mean_alive REAL,
+                        helper_mean_alive REAL,
+                        helper_gave_food_to_user REAL,
+                        helper_gave_food_to_bystander REAL,
+                        helper_gave_water_to_user REAL,
+                        helper_gave_water_to_bystander REAL
+                    )
+                ''')
+                
+                # Add columns if they do not exist (for backward compatibility with existing db)
+                try:
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN agent_0_mean_health REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN agent_1_mean_health REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN helper_mean_health REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN agent_0_mean_alive REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN agent_1_mean_alive REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN helper_mean_alive REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN helper_gave_food_to_user REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN helper_gave_food_to_bystander REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN helper_gave_water_to_user REAL')
+                    cursor.execute('ALTER TABLE phase2_metrics ADD COLUMN helper_gave_water_to_bystander REAL')
+                except sqlite3.OperationalError:
+                    pass # Columns already exist
+
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_wandbid ON phase2_metrics (wandbid)')
+                
+                cursor.execute('''
+                    INSERT INTO phase2_metrics (
+                        wandbid, helper_objective, epoch, helper_mean_episode_returns,
+                        helper_mean_episode_critic_predictions, agent_0_mean_episode_returns,
+                        agent_1_mean_episode_returns, agent_0_mean_episode_empowerment,
+                        agent_1_mean_episode_empowerment, freeze_frequency_mean,
+                        agent_0_mean_health, agent_1_mean_health, helper_mean_health,
+                        agent_0_mean_alive, agent_1_mean_alive, helper_mean_alive,
+                        helper_gave_food_to_user, helper_gave_food_to_bystander,
+                        helper_gave_water_to_user, helper_gave_water_to_bystander
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    wandb_id,
+                    "user_empowerment_hybrid",
+                    int(metric["update_steps"]),
+                    to_log["helper_mean_episode_returns"],
+                    to_log["helper_mean_episode_critic_predictions"],
+                    to_log["agent_0_mean_episode_returns"],
+                    to_log["agent_1_mean_episode_returns"],
+                    to_log["agent_0_mean_episode_empowerment"],
+                    to_log["agent_1_mean_episode_empowerment"],
+                    to_log["freeze_frequency_mean"],
+                    to_log["agent_0_mean_health"],
+                    to_log["agent_1_mean_health"],
+                    to_log["helper_mean_health"],
+                    to_log["agent_0_mean_alive"],
+                    to_log["agent_1_mean_alive"],
+                    to_log["helper_mean_alive"],
+                    to_log["helper_gave_food_to_user"],
+                    to_log["helper_gave_food_to_bystander"],
+                    to_log["helper_gave_water_to_user"],
+                    to_log["helper_gave_water_to_bystander"]
+                ))
+                conn.commit()
+                conn.close()
 
             jax.experimental.io_callback(callback, None, metric)
             update_steps = update_steps + 1
@@ -582,11 +754,13 @@ def single_run(config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", help="Name of the config YAML file (in baselines/config/)")
+    parser.add_argument("--random", action="store_true", help="Force agent_1 to act randomly for baseline disempowerment.")
     args = parser.parse_args()
 
     config_path = os.path.join(os.path.dirname(__file__), "config", args.config_file)
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
+    config["RANDOM_ASSISTANT"] = config.get("RANDOM_ASSISTANT", False) or args.random
     single_run(config)
 
 

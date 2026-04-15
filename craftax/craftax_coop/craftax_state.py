@@ -123,6 +123,8 @@ class EnvState:
     trade_count: int
     food_trade_count: int
     drink_trade_count: int
+    food_given_matrix: jnp.ndarray
+    drink_given_matrix: jnp.ndarray
     revives: int
     ff_damage_dealt: float
     
@@ -149,7 +151,7 @@ class EnvParams:
 
     # Game Mode Parameters
     god_mode: bool = False
-    shared_reward: bool = True
+    shared_reward: bool = False # TODO: set this to False to try again later!
     friendly_fire: bool = True
 
 @struct.dataclass
