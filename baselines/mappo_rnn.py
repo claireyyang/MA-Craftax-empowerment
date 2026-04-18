@@ -756,7 +756,7 @@ def single_run(config):
         ],
         name=config.get("RUN_NAME"),
         id=resume_id,
-        resume="must" if resume_id else None,
+        resume="allow" if resume_id else None,
         config=config,
         mode=config["WANDB_MODE"],
     )
@@ -772,9 +772,9 @@ def single_run(config):
     train_chunk_vjit = jax.jit(jax.vmap(train_chunk_fn))
     
     options = ocp.CheckpointManagerOptions(max_to_keep=3, create=True)
-    checkpoint_dir = pathlib.Path("checkpoints") / wandbid
+    checkpoint_dir = pathlib.Path(os.path.abspath("checkpoints")) / wandbid
     checkpoint_manager = ocp.CheckpointManager(
-        checkpoint_dir, ocp.PyTreeCheckpointer(), options=options
+        checkpoint_dir, options=options
     )
     
     if resume_id:
@@ -782,7 +782,7 @@ def single_run(config):
         step = checkpoint_manager.latest_step()
         if step is not None:
             runner_state_and_steps = jax.block_until_ready(init_vjit(rngs))
-            restored = checkpoint_manager.restore(step, item=runner_state_and_steps)
+            restored = checkpoint_manager.restore(step, args=ocp.args.StandardRestore(runner_state_and_steps))
             runner_state_and_steps = restored
         else:
             print("No checkpoint found to resume from! Starting fresh.")
@@ -798,12 +798,13 @@ def single_run(config):
         runner_state_and_steps, metric = jax.block_until_ready(train_chunk_vjit(runner_state_and_steps))
         step_idx = int(runner_state_and_steps[1][0])
         try:
-            checkpoint_manager.save(step_idx, item=runner_state_and_steps)
-        except TypeError:
-            try:
-                checkpoint_manager.save(step_idx, args=ocp.args.StandardSave(runner_state_and_steps))
-            except Exception as e:
-                print(f"Warning: could not save checkpoint: {e}")
+            checkpoint_manager.save(step_idx, args=ocp.args.StandardSave(runner_state_and_steps))
+        except Exception as e:
+            print(f"Warning: could not save checkpoint: {e}")
+        
+        # Wait until the checkpoint is fully saved to prevent memory leaks from the async save queue building up
+        checkpoint_manager.wait_until_finished()
+        
         print(f"Saved checkpoint for chunk {chunk+1}/{num_chunks} at step {step_idx}")
 
     checkpoint_manager.wait_until_finished()
