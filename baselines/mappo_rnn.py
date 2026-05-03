@@ -656,6 +656,29 @@ def make_train(config, env):
                         return float(jnp.asarray(x).reshape(-1)[returned_ep].mean())
                     to_log.update(jax.tree.map(_reduce_user_info, metric["user_info"]))
 
+                    # Per-agent achievement breakdown.
+                    # Each user_info leaf has shape (NUM_SEEDS, NUM_STEPS, NUM_ACTORS)
+                    # where NUM_ACTORS = NUM_ENVS * num_agents.  The reshape at collection
+                    # time flattened (NUM_ENVS, num_agents) -> (NUM_ACTORS,) in C-order,
+                    # so the agent index is the *fastest-varying* dimension.
+                    num_agents = env.num_agents
+                    # returned_ep has shape (NUM_SEEDS * NUM_STEPS * NUM_ACTORS,).
+                    # Reshape to (..., num_agents) to separate agents.
+                    returned_ep_by_agent = returned_ep.reshape(-1, num_agents)
+                    # Agent name mapping: env player 0 = Warrior = "agent_1" (Bystander),
+                    #                     env player 1 = Forager = "helper" (Assistant),
+                    #                     env player 2 = Miner   = "agent_0" (User).
+                    agent_labels = {0: "agent_1", 1: "helper", 2: "agent_0"}
+                    for agent_idx, agent_label in agent_labels.items():
+                        agent_mask = returned_ep_by_agent[:, agent_idx]
+                        if agent_mask.any():
+                            def _reduce_agent(x, _idx=agent_idx, _mask=agent_mask):
+                                vals = jnp.asarray(x).reshape(-1, num_agents)[:, _idx]
+                                return float(vals[_mask].mean())
+                            agent_info = jax.tree.map(_reduce_agent, metric["user_info"])
+                            for k, v in agent_info.items():
+                                to_log[f"{agent_label}/{k}"] = v
+
                 print({k: v for k, v in to_log.items() if "loss" not in k})
                 
                 if wandb.run is not None:

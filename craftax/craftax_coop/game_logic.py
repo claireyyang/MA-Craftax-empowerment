@@ -982,6 +982,38 @@ def do_crafting(state, actions, static_params):
         torches=new_inventory.torches + 4 * is_crafting_torch,
     )
 
+    # Set craft achievements for all crafted items (per-agent first-time tracking)
+    new_achievements = new_achievements.at[:, Achievement.MAKE_WOOD_PICKAXE.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_WOOD_PICKAXE.value], is_crafting_wood_pickaxe)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_STONE_PICKAXE.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_STONE_PICKAXE.value], is_crafting_stone_pickaxe)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_IRON_PICKAXE.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_IRON_PICKAXE.value], is_crafting_iron_pickaxe)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_DIAMOND_PICKAXE.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_DIAMOND_PICKAXE.value], is_crafting_diamond_pickaxe)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_WOOD_SWORD.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_WOOD_SWORD.value], is_crafting_wood_sword)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_STONE_SWORD.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_STONE_SWORD.value], is_crafting_stone_sword)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_IRON_SWORD.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_IRON_SWORD.value], is_crafting_iron_sword)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_DIAMOND_SWORD.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_DIAMOND_SWORD.value], is_crafting_diamond_sword)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_ARROW.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_ARROW.value], is_crafting_arrow)
+    )
+    new_achievements = new_achievements.at[:, Achievement.MAKE_TORCH.value].set(
+        jnp.logical_or(new_achievements[:, Achievement.MAKE_TORCH.value], is_crafting_torch)
+    )
+
     state = state.replace(
         inventory=new_inventory,
         achievements=new_achievements,
