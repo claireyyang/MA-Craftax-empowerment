@@ -186,9 +186,14 @@ def unbatchify_actions(x: jnp.ndarray, agent_list, num_envs, num_actors):
 # ===========================
 def make_train(config, env):
     config["NUM_ACTORS"] = env.num_agents * config["NUM_ENVS"]
-    config["NUM_UPDATES"] = (
+    base_num_updates = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     )
+    save_interval = config.setdefault("SAVE_INTERVAL", 50)
+    if base_num_updates % save_interval != 0:
+        config["NUM_UPDATES"] = base_num_updates + (save_interval - base_num_updates % save_interval)
+    else:
+        config["NUM_UPDATES"] = base_num_updates
     config["MINIBATCH_SIZE"] = (
         config["NUM_ACTORS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
@@ -205,7 +210,7 @@ def make_train(config, env):
         )
         return config["LR"] * frac
 
-    def train(rng):
+    def init_runner_state(rng):
         # INIT NETWORK
         actor_network = ActorRNN(env.action_space(env.agents[0]).n, config=config)
         critic_network = CriticRNN(config=config)
@@ -259,6 +264,21 @@ def make_train(config, env):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0,))(reset_rng)
         ac_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], config["GRU_HIDDEN_DIM"])
         cr_init_hstate = ScannedRNN.initialize_carry(config["NUM_ACTORS"], config["GRU_HIDDEN_DIM"])
+
+        rng, _rng = jax.random.split(rng)
+        runner_state = (
+            (actor_train_state, critic_train_state),
+            env_state,
+            obsv,
+            jnp.zeros((config["NUM_ACTORS"]), dtype=bool),
+            (ac_init_hstate, cr_init_hstate),
+            _rng,
+        )
+        return runner_state, jnp.array(0, dtype=jnp.int32)
+
+    def train_chunk(runner_state_and_steps):
+        actor_network = ActorRNN(env.action_space(env.agents[0]).n, config=config)
+        critic_network = CriticRNN(config=config)
 
         # TRAIN LOOP
         def _update_step(update_runner_state, unused):
@@ -707,21 +727,11 @@ def make_train(config, env):
             runner_state = (train_states, env_state, last_obs, last_done, hstates, rng)
             return (runner_state, update_steps), metric
 
-        rng, _rng = jax.random.split(rng)
-        runner_state = (
-            (actor_train_state, critic_train_state),
-            env_state,
-            obsv,
-            jnp.zeros((config["NUM_ACTORS"]), dtype=bool),
-            (ac_init_hstate, cr_init_hstate),
-            _rng,
+        return jax.lax.scan(
+            _update_step, runner_state_and_steps, None, config["SAVE_INTERVAL"]
         )
-        runner_state, metric = jax.lax.scan(
-            _update_step, (runner_state, 0), None, config["NUM_UPDATES"]
-        )
-        return {"runner_state": runner_state}
 
-    return train
+    return init_runner_state, train_chunk
 
 # ===========================
 # Main Run Function
@@ -731,6 +741,11 @@ def single_run(config):
     env_name = config.get("ENV_NAME", "Craftax-Coop-Symbolic")
     env = make_craftax_env_from_name(env_name)
 
+    resume_id = config.get("RESUME_WANDBID", None)
+
+    import orbax.checkpoint as ocp
+    import pathlib
+
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
@@ -739,28 +754,75 @@ def single_run(config):
             env_name.upper(),
             f"jax_{jax.__version__}",
         ],
-        name=config["RUN_NAME"],
+        name=config.get("RUN_NAME"),
+        id=resume_id,
+        resume="allow" if resume_id else None,
         config=config,
         mode=config["WANDB_MODE"],
     )
+    
+    wandbid = wandb.run.id if wandb.run is not None else "offline"
 
+    init_fn, train_chunk_fn = make_train(config, env)
+    
     rng = jax.random.PRNGKey(config["SEED"])
-
     rngs = jax.random.split(rng, config["NUM_SEEDS"])
-    train_vjit = jax.jit(jax.vmap(make_train(config, env)))
-    outs = jax.block_until_ready(train_vjit(rngs))
+    
+    init_vjit = jax.jit(jax.vmap(init_fn))
+    train_chunk_vjit = jax.jit(jax.vmap(train_chunk_fn))
+    
+    options = ocp.CheckpointManagerOptions(max_to_keep=3, create=True)
+    checkpoint_dir = pathlib.Path(os.path.abspath("checkpoints")) / wandbid
+    checkpoint_manager = ocp.CheckpointManager(
+        checkpoint_dir, options=options
+    )
+    
+    if resume_id:
+        print(f"Resuming from checkpoint {checkpoint_dir}")
+        step = checkpoint_manager.latest_step()
+        if step is not None:
+            runner_state_and_steps = jax.block_until_ready(init_vjit(rngs))
+            restored = checkpoint_manager.restore(step, args=ocp.args.StandardRestore(runner_state_and_steps))
+            runner_state_and_steps = restored
+        else:
+            print("No checkpoint found to resume from! Starting fresh.")
+            runner_state_and_steps = jax.block_until_ready(init_vjit(rngs))
+    else:
+        runner_state_and_steps = jax.block_until_ready(init_vjit(rngs))
+        
+    num_chunks = config["NUM_UPDATES"] // config["SAVE_INTERVAL"]
+    current_step = int(runner_state_and_steps[1][0]) # Extract update_steps from first seed
+    start_chunk = current_step // config["SAVE_INTERVAL"]
+    
+    for chunk in range(start_chunk, num_chunks):
+        runner_state_and_steps, metric = jax.block_until_ready(train_chunk_vjit(runner_state_and_steps))
+        step_idx = int(runner_state_and_steps[1][0])
+        try:
+            checkpoint_manager.save(step_idx, args=ocp.args.StandardSave(runner_state_and_steps))
+        except Exception as e:
+            print(f"Warning: could not save checkpoint: {e}")
+        
+        # Wait until the checkpoint is fully saved to prevent memory leaks from the async save queue building up
+        checkpoint_manager.wait_until_finished()
+        
+        print(f"Saved checkpoint for chunk {chunk+1}/{num_chunks} at step {step_idx}")
+
+    checkpoint_manager.wait_until_finished()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", help="Name of the config YAML file (in baselines/config/)")
     parser.add_argument("--random", action="store_true", help="Force agent_1 to act randomly for baseline disempowerment.")
+    parser.add_argument("--resume", type=str, default=None, help="Wandb run ID to resume from.")
     args = parser.parse_args()
 
     config_path = os.path.join(os.path.dirname(__file__), "config", args.config_file)
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     config["RANDOM_ASSISTANT"] = config.get("RANDOM_ASSISTANT", False) or args.random
+    if args.resume:
+        config["RESUME_WANDBID"] = args.resume
     single_run(config)
 
 
