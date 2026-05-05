@@ -527,14 +527,14 @@ class Achievement(Enum):
     MAKE_IRON_ARMOUR = 27
     MAKE_DIAMOND_ARMOUR = 28
 
-    ENTER_GNOMISH_MINES = 29
-    ENTER_DUNGEON = 30
-    ENTER_SEWERS = 31
-    ENTER_VAULT = 32
-    ENTER_TROLL_MINES = 33
-    ENTER_FIRE_REALM = 34
-    ENTER_ICE_REALM = 35
-    ENTER_GRAVEYARD = 36
+    ENTER_DUNGEON_LEVEL_1 = 29
+    ENTER_DUNGEON_LEVEL_2 = 30
+    ENTER_DUNGEON_LEVEL_3 = 31
+    ENTER_DUNGEON_LEVEL_4 = 32
+    ENTER_DUNGEON_LEVEL_5 = 33
+    ENTER_DUNGEON_LEVEL_6 = 34
+    ENTER_DUNGEON_LEVEL_7 = 35
+    ENTER_DUNGEON_LEVEL_8 = 36
 
     DEFEAT_GNOME_WARRIOR = 37
     DEFEAT_GNOME_ARCHER = 38
@@ -575,8 +575,11 @@ INTERMEDIATE_ACHIEVEMENTS = [
     Achievement.MAKE_DIAMOND_SWORD.value,
     Achievement.MAKE_IRON_ARMOUR.value,
     Achievement.MAKE_DIAMOND_ARMOUR.value,
-    Achievement.ENTER_GNOMISH_MINES.value,
-    Achievement.ENTER_DUNGEON.value,
+    Achievement.ENTER_DUNGEON_LEVEL_1.value,
+    Achievement.ENTER_DUNGEON_LEVEL_2.value,
+    Achievement.ENTER_DUNGEON_LEVEL_3.value,
+    Achievement.ENTER_DUNGEON_LEVEL_4.value,
+    Achievement.ENTER_DUNGEON_LEVEL_5.value,
     Achievement.DEFEAT_GNOME_WARRIOR.value,
     Achievement.DEFEAT_GNOME_ARCHER.value,
     Achievement.DEFEAT_ORC_SOLIDER.value,
@@ -591,9 +594,9 @@ INTERMEDIATE_ACHIEVEMENTS = [
 
 
 VERY_ADVANCED_ACHIEVEMENTS = [
-    Achievement.ENTER_FIRE_REALM.value,
-    Achievement.ENTER_ICE_REALM.value,
-    Achievement.ENTER_GRAVEYARD.value,
+    Achievement.ENTER_DUNGEON_LEVEL_6.value,
+    Achievement.ENTER_DUNGEON_LEVEL_7.value,
+    Achievement.ENTER_DUNGEON_LEVEL_8.value,
     Achievement.DEFEAT_PIGMAN.value,
     Achievement.DEFEAT_FIRE_ELEMENTAL.value,
     Achievement.DEFEAT_FROST_TROLL.value,
@@ -622,14 +625,14 @@ ACHIEVEMENT_REWARD_MAP = jnp.array(
 LEVEL_ACHIEVEMENT_MAP = jnp.array(
     [
         0,
-        Achievement.ENTER_DUNGEON.value,
-        Achievement.ENTER_GNOMISH_MINES.value,
-        Achievement.ENTER_SEWERS.value,
-        Achievement.ENTER_VAULT.value,
-        Achievement.ENTER_TROLL_MINES.value,
-        Achievement.ENTER_FIRE_REALM.value,
-        Achievement.ENTER_ICE_REALM.value,
-        Achievement.ENTER_GRAVEYARD.value,
+        Achievement.ENTER_DUNGEON_LEVEL_1.value,
+        Achievement.ENTER_DUNGEON_LEVEL_2.value,
+        Achievement.ENTER_DUNGEON_LEVEL_3.value,
+        Achievement.ENTER_DUNGEON_LEVEL_4.value,
+        Achievement.ENTER_DUNGEON_LEVEL_5.value,
+        Achievement.ENTER_DUNGEON_LEVEL_6.value,
+        Achievement.ENTER_DUNGEON_LEVEL_7.value,
+        Achievement.ENTER_DUNGEON_LEVEL_8.value,
     ]
 )
 

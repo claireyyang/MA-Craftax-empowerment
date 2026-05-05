@@ -9,6 +9,7 @@ from craftax_coop.util.game_logic_utils import get_ladder_positions
 from craftax_coop.util.noise import generate_fractal_noise_2d
 from craftax_coop.world_gen.world_gen_configs import (
     ALL_DUNGEON_CONFIGS,
+    ALL_DUNGEON_CONFIGS_9,
     ALL_SMOOTHGEN_CONFIGS,
 )
 
@@ -309,7 +310,10 @@ def generate_dungeon(rng, static_params, config):
         ItemType.LADDER_UP.value
     )
 
-    return map, item_map, light_map, ladders_down, ladders_up
+    # Return room_positions (unpadded) so callers can use them for player spawn
+    unpadded_room_positions = room_positions - jnp.array([MAX_ROOM_SIZE, MAX_ROOM_SIZE])
+
+    return map, item_map, light_map, ladders_down, ladders_up, unpadded_room_positions
 
 
 def generate_smoothworld(rng, static_params, player_position, config, params=None):
@@ -488,13 +492,35 @@ def generate_smoothworld(rng, static_params, player_position, config, params=Non
 
 
 def generate_world(rng, params, static_params):
-    # Start players in the middle of the map
+    # Fix player specializations
+    player_specialization_order = jnp.array([Specialization.WARRIOR.value, Specialization.FORAGER.value, Specialization.MINER.value])
+    player_specializations = player_specialization_order[jnp.arange(static_params.player_count) % 3]
+
+    # Generate all 9 levels as dungeons (simplified world for tractable experiments)
+    rngs = jax.random.split(rng, 10)
+    rng, _rng = rngs[0], rngs[1:]
+    dungeon_results = jax.vmap(generate_dungeon, in_axes=(0, None, 0))(
+        _rng, static_params, ALL_DUNGEON_CONFIGS_9
+    )
+
+    # Unpack: generate_dungeon now returns 6 values (map, item_map, light_map, ladders_down, ladders_up, room_positions)
+    map = dungeon_results[0]
+    item_map = dungeon_results[1]
+    light_map = dungeon_results[2]
+    ladders_down = dungeon_results[3]
+    ladders_up = dungeon_results[4]
+    all_room_positions = dungeon_results[5]  # (9, NUM_ROOMS, 2)
+
+    # Spawn players inside the first room of the first dungeon level
+    # room_positions[0][0] is the top-left corner of the first room on level 0
+    # Offset by (1,1) to place players inside the room (not on the wall/torch)
+    first_room_pos = all_room_positions[0, 0]  # (2,)
     def get_player_spawn(idx):
         width = jnp.ceil(jnp.sqrt(static_params.player_count)).astype(jnp.int32)
         return jnp.array(
             [
-                (static_params.map_size[0] // 2) + (idx // width),
-                (static_params.map_size[1] // 2) + (idx % width),
+                first_room_pos[0] + 1 + (idx // width),
+                first_room_pos[1] + 1 + (idx % width),
             ]
         )
 
@@ -502,33 +528,9 @@ def generate_world(rng, params, static_params):
         jnp.arange(0, static_params.player_count)
     )
 
-    # Fix player specializations
-    player_specialization_order = jnp.array([Specialization.WARRIOR.value, Specialization.FORAGER.value, Specialization.MINER.value])
-    player_specializations = player_specialization_order[jnp.arange(static_params.player_count) % 3]
-
-    # Generate smoothgens (overworld, caves, elemental levels, boss level)
-    rngs = jax.random.split(rng, 7)
-    rng, _rng = rngs[0], rngs[1:]
-    smoothgens = jax.vmap(generate_smoothworld, in_axes=(0, None, None, 0))(
-        _rng, static_params, player_position, ALL_SMOOTHGEN_CONFIGS
-    )
-
-    # Generate dungeons
-    rngs = jax.random.split(rng, 4)
-    rng, _rng = rngs[0], rngs[1:]
-    dungeons = jax.vmap(generate_dungeon, in_axes=(0, None, 0))(
-        _rng, static_params, ALL_DUNGEON_CONFIGS
-    )
-
-    # Returns stacked versions of the map, item_map, light_map and ladders
-    # 9 elements in each of these stacks representing each of the levels.
-    # Splice smoothgens and dungeons in order of levels
-    map, item_map, light_map, ladders_down, ladders_up = jax.tree_util.tree_map(
-        lambda x, y: jnp.stack(
-            (x[0], y[0], x[1], y[1], y[2], x[2], x[3], x[4], x[5]), axis=0
-        ),
-        smoothgens,
-        dungeons,
+    # Ensure player spawn tiles are walkable PATH blocks on level 0
+    map = map.at[0, player_position[:, 0], player_position[:, 1]].set(
+        BlockType.PATH.value
     )
 
     # Mobs

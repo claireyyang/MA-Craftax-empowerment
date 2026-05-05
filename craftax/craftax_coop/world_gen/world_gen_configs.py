@@ -304,3 +304,11 @@ ALL_DUNGEON_CONFIGS = jax.tree_util.tree_map(
     SEWER_CONFIG,
     VAULTS_CONFIG,
 )
+
+# 9 dungeon configs for simplified world gen (all levels are dungeons)
+ALL_DUNGEON_CONFIGS_9 = jax.tree_util.tree_map(
+    lambda x, y, z: jnp.stack((x, y, z, x, y, z, x, y, z), axis=0),
+    DUNGEON_CONFIG,
+    SEWER_CONFIG,
+    VAULTS_CONFIG,
+)
