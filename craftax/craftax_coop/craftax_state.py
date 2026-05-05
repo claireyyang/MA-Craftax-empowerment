@@ -151,7 +151,7 @@ class EnvParams:
 
     # Game Mode Parameters
     god_mode: bool = False
-    shared_reward: bool = False # TODO: set this to False to try again later!
+    shared_reward: bool = True
     friendly_fire: bool = True
 
 @struct.dataclass
