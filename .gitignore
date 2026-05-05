@@ -1,3 +1,4 @@
 *.pyc
 wandb/
 train_data/
+checkpoints/

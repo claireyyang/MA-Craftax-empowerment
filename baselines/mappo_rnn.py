@@ -590,46 +590,95 @@ def make_train(config, env):
             rng = update_state[-1]
 
             def callback(metric):
+                # When vmapped over NUM_SEEDS, every array in metric has an extra
+                # leading (NUM_SEEDS,) dimension. We aggregate across seeds so that
+                # WandB receives single scalar values.
+                num_seeds = config["NUM_SEEDS"]
+
+                # update_steps is identical across seeds; take the first seed's value
+                update_steps_scalar = int(jnp.asarray(metric["update_steps"]).flatten()[0])
                 env_step = (
-                    metric["update_steps"]
+                    update_steps_scalar
                     * config["NUM_ENVS"]
                     * config["NUM_STEPS"]
                 )
+
+                # Loss metrics are already reduced to per-seed scalars by the
+                # training loop; average them across seeds.
+                reduced_loss = jax.tree.map(
+                    lambda x: float(jnp.asarray(x).mean()), metric["loss"]
+                )
                 to_log = {
                     "env_step": env_step,
-                    **metric["loss"],
+                    **reduced_loss,
                 }
 
-                # Approximate per-episode quantities via rollout sums scaled by typical frequencies
-                to_log["agent_0_mean_episode_returns"] = float(metric["custom_rew_agent_2"].sum(axis=0).mean())
-                to_log["agent_1_mean_episode_returns"] = float(metric["custom_rew_agent_0"].sum(axis=0).mean())
-                to_log["helper_mean_episode_returns"] = float(metric["custom_rew_agent_1"].sum(axis=0).mean())
+                # For per-step / per-actor metrics the shapes are
+                # (NUM_SEEDS, NUM_STEPS, NUM_ACTORS) or similar.
+                # .sum(axis=-2) sums over the time axis (second-to-last),
+                # then .mean() averages over seeds + actors.
+                # Using axis-agnostic .mean() is fine because we want the
+                # grand mean across seeds, time steps, and actors anyway.
 
-                to_log["agent_0_mean_episode_empowerment"] = float(metric["custom_emp_agent_2"].mean())
-                to_log["agent_1_mean_episode_empowerment"] = float(metric["custom_emp_agent_0"].mean())
-                to_log["helper_mean_episode_critic_predictions"] = float(metric["custom_val_agent_1"].mean())
+                # Approximate per-episode quantities via rollout sums scaled by typical frequencies
+                to_log["agent_0_mean_episode_returns"] = float(jnp.asarray(metric["custom_rew_agent_2"]).sum(axis=-2).mean())
+                to_log["agent_1_mean_episode_returns"] = float(jnp.asarray(metric["custom_rew_agent_0"]).sum(axis=-2).mean())
+                to_log["helper_mean_episode_returns"] = float(jnp.asarray(metric["custom_rew_agent_1"]).sum(axis=-2).mean())
+
+                to_log["agent_0_mean_episode_empowerment"] = float(jnp.asarray(metric["custom_emp_agent_2"]).mean())
+                to_log["agent_1_mean_episode_empowerment"] = float(jnp.asarray(metric["custom_emp_agent_0"]).mean())
+                to_log["helper_mean_episode_critic_predictions"] = float(jnp.asarray(metric["custom_val_agent_1"]).mean())
                 to_log["freeze_frequency_mean"] = 0.0
                 
                 # Format to match index assignments from returns (agent_0->2, agent_1->0, helper->1)
-                to_log["agent_0_mean_health"] = float(metric["custom_health_agent_2"].mean())
-                to_log["agent_1_mean_health"] = float(metric["custom_health_agent_0"].mean())
-                to_log["helper_mean_health"] = float(metric["custom_health_agent_1"].mean())
-                to_log["agent_0_mean_alive"] = float(metric["custom_alive_agent_2"].mean())
-                to_log["agent_1_mean_alive"] = float(metric["custom_alive_agent_0"].mean())
-                to_log["helper_mean_alive"] = float(metric["custom_alive_agent_1"].mean())
+                to_log["agent_0_mean_health"] = float(jnp.asarray(metric["custom_health_agent_2"]).mean())
+                to_log["agent_1_mean_health"] = float(jnp.asarray(metric["custom_health_agent_0"]).mean())
+                to_log["helper_mean_health"] = float(jnp.asarray(metric["custom_health_agent_1"]).mean())
+                to_log["agent_0_mean_alive"] = float(jnp.asarray(metric["custom_alive_agent_2"]).mean())
+                to_log["agent_1_mean_alive"] = float(jnp.asarray(metric["custom_alive_agent_0"]).mean())
+                to_log["helper_mean_alive"] = float(jnp.asarray(metric["custom_alive_agent_1"]).mean())
                 
-                to_log["helper_gave_food_to_user"] = float(metric["custom_step_food_h_to_u"].sum(axis=0).mean())
-                to_log["helper_gave_food_to_bystander"] = float(metric["custom_step_food_h_to_b"].sum(axis=0).mean())
-                to_log["helper_gave_water_to_user"] = float(metric["custom_step_drink_h_to_u"].sum(axis=0).mean())
-                to_log["helper_gave_water_to_bystander"] = float(metric["custom_step_drink_h_to_b"].sum(axis=0).mean())
+                to_log["helper_gave_food_to_user"] = float(jnp.asarray(metric["custom_step_food_h_to_u"]).sum(axis=-2).mean())
+                to_log["helper_gave_food_to_bystander"] = float(jnp.asarray(metric["custom_step_food_h_to_b"]).sum(axis=-2).mean())
+                to_log["helper_gave_water_to_user"] = float(jnp.asarray(metric["custom_step_drink_h_to_u"]).sum(axis=-2).mean())
+                to_log["helper_gave_water_to_bystander"] = float(jnp.asarray(metric["custom_step_drink_h_to_b"]).sum(axis=-2).mean())
 
-                if metric["returned_episode"].any():
-                    to_log.update(jax.tree.map(
-                        lambda x: float(x[metric["returned_episode"]].mean()),
-                        metric["user_info"]
-                    ))
-                    to_log["episode_lengths"] = float(metric["returned_episode_lengths"][metric["returned_episode"]].mean())
-                    to_log["episode_returns"] = float(metric["returned_episode_returns"][metric["returned_episode"]].mean())
+                # Flatten seed dimension into the batch dims for boolean-masked quantities
+                returned_ep = jnp.asarray(metric["returned_episode"]).reshape(-1)
+                if returned_ep.any():
+                    ret_lengths = jnp.asarray(metric["returned_episode_lengths"]).reshape(-1)
+                    ret_returns = jnp.asarray(metric["returned_episode_returns"]).reshape(-1)
+                    to_log["episode_lengths"] = float(ret_lengths[returned_ep].mean())
+                    to_log["episode_returns"] = float(ret_returns[returned_ep].mean())
+
+                    # user_info: flatten each leaf along seed+batch dims, then mask
+                    def _reduce_user_info(x):
+                        return float(jnp.asarray(x).reshape(-1)[returned_ep].mean())
+                    to_log.update(jax.tree.map(_reduce_user_info, metric["user_info"]))
+
+                    # Per-agent achievement breakdown.
+                    # Each user_info leaf has shape (NUM_SEEDS, NUM_STEPS, NUM_ACTORS)
+                    # where NUM_ACTORS = NUM_ENVS * num_agents.  The reshape at collection
+                    # time flattened (NUM_ENVS, num_agents) -> (NUM_ACTORS,) in C-order,
+                    # so the agent index is the *fastest-varying* dimension.
+                    num_agents = env.num_agents
+                    # returned_ep has shape (NUM_SEEDS * NUM_STEPS * NUM_ACTORS,).
+                    # Reshape to (..., num_agents) to separate agents.
+                    returned_ep_by_agent = returned_ep.reshape(-1, num_agents)
+                    # Agent name mapping: env player 0 = Warrior = "agent_1" (Bystander),
+                    #                     env player 1 = Forager = "helper" (Assistant),
+                    #                     env player 2 = Miner   = "agent_0" (User).
+                    agent_labels = {0: "agent_1", 1: "helper", 2: "agent_0"}
+                    for agent_idx, agent_label in agent_labels.items():
+                        agent_mask = returned_ep_by_agent[:, agent_idx]
+                        if agent_mask.any():
+                            def _reduce_agent(x, _idx=agent_idx, _mask=agent_mask):
+                                vals = jnp.asarray(x).reshape(-1, num_agents)[:, _idx]
+                                return float(vals[_mask].mean())
+                            agent_info = jax.tree.map(_reduce_agent, metric["user_info"])
+                            for k, v in agent_info.items():
+                                to_log[f"{agent_label}/{k}"] = v
+
                 print({k: v for k, v in to_log.items() if "loss" not in k})
                 
                 if wandb.run is not None:
@@ -700,7 +749,7 @@ def make_train(config, env):
                 ''', (
                     wandb_id,
                     "user_empowerment_hybrid",
-                    int(metric["update_steps"]),
+                    update_steps_scalar,
                     to_log["helper_mean_episode_returns"],
                     to_log["helper_mean_episode_critic_predictions"],
                     to_log["agent_0_mean_episode_returns"],
