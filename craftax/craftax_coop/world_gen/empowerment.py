@@ -8,8 +8,8 @@ def estimate_craftax_empowerment_monte_carlo(
     initial_state,
     n_trajectories: int = 10,
     horizon: int = 3,
-    map_width: int = 48,  # Default Craftax-Coop map size
-    map_height: int = 48,
+    map_width: int = 32,
+    map_height: int = 32,
 ):
     """
     Estimates empowerment for Craftax-Coop agents via Monte Carlo rollouts.
